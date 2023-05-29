@@ -1,117 +1,135 @@
-#include <QtGui>
-#include <QtOpenGL>
-#include <QOpenGLWidget>
-#include <QOpenGLFunctions>
 #include <QApplication>
-#include <GL/gl.h>
-#include <GL/glu.h>
+#include <QOpenGLWidget>
+#include <QOpenGLFunctions_4_5_Core>
+#include <QImage>
+#include <QVector3D>
+#include <QMatrix4x4>
+#include <QQuaternion>
+#include <vector>
+#include <QKeyEvent>
 
-class GLWidget : public QOpenGLWidget
-{
+class PointCloudWidget : public QOpenGLWidget, protected QOpenGLFunctions_4_5_Core {
 public:
-    explicit GLWidget(QWidget *parent = nullptr) : QOpenGLWidget(parent) {}
+    PointCloudWidget(QWidget* parent = nullptr) : QOpenGLWidget(parent) {}
 
 protected:
-    void initializeGL() override
-    {
+    void initializeGL() override {
+        initializeOpenGLFunctions();
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
-    void resizeGL(int w, int h) override
-    {
-        widthW = w;
-        heightW = h;
-
-        glViewport(0, 0, widthW, heightW);
-
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        gluOrtho2D(0, widthW, 0, heightW); // Set the orthographic projection to match the widget dimensions
-
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
+    void resizeGL(int w, int h) override {
+        glViewport(0, 0, w, h);
     }
 
-    void paintGL() override
-    {
-        glViewport(0, 0, width(), height()); // Set the viewport to match the window dimensions
+    void paintGL() override {
+        glClear(GL_COLOR_BUFFER_BIT);
 
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        gluOrtho2D(0, image.width(), 0, image.height()); // Set the orthographic projection to match the image dimensions
-
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        drawImageIn3D();
-
-        // Add any additional rendering or OpenGL calls here
-    }
-
-    void drawImageIn3D()
-    {
-        // Load the PNG image
-        QImage image("1.png");
-        if (image.isNull())
-        {
-            qDebug() << "Failed to load image";
+        // Load RGB image
+        QImage rgbImage("1.png");
+        if (rgbImage.isNull()) {
+            qDebug("Failed to load RGB image.");
             return;
         }
 
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        glOrtho(0, width(), 0, height(), -1, 1); // Set the orthographic projection to match the widget dimensions
-
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-
-        glDisable(GL_DEPTH_TEST);
-
-        glEnable(GL_TEXTURE_2D);
-        if (textureId == 0)
-        {
-            glGenTextures(1, &textureId);
+        // Load depth image
+        QImage depthImage("1b.png");
+        if (depthImage.isNull()) {
+            qDebug("Failed to load depth image.");
+            return;
         }
-        glBindTexture(GL_TEXTURE_2D, textureId);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.width(), image.height(), 0, GL_BGRA, GL_UNSIGNED_BYTE, image.bits()); // Use GL_BGRA to fix color issues
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-        // Calculate the position to center the image
-        float xPos = (width() - image.width()) / 2.0;
-        float yPos = (height() - image.height()) / 2.0;
+        // Convert images to point cloud
+        std::vector<QVector3D> pointCloud;
+        for (int y = 0; y < rgbImage.height(); ++y) {
+            for (int x = 0; x < rgbImage.width(); ++x) {
+                QColor rgbColor = rgbImage.pixelColor(x, y);
+                QColor depthColor = depthImage.pixelColor(x, y);
 
-        glBegin(GL_QUADS);
-        glTexCoord2f(0.0, 1.0); // Flip the texture vertically
-        glVertex2f(xPos, yPos);
-        glTexCoord2f(1.0, 1.0);
-        glVertex2f(xPos + image.width(), yPos);
-        glTexCoord2f(1.0, 0.0);
-        glVertex2f(xPos + image.width(), yPos + image.height());
-        glTexCoord2f(0.0, 0.0);
-        glVertex2f(xPos, yPos + image.height());
+                float depth = depthColor.valueF(); // Assuming grayscale depth in the range [0, 1]
+                float normalizedX = (2.0f * x / rgbImage.width()) - 1.0f;
+                float normalizedY = (2.0f * y / rgbImage.height()) - 1.0f;
+                QVector3D point(normalizedX, normalizedY, depth);
+                pointCloud.push_back(point);
+            }
+        }
+
+        // Apply transformations
+        QMatrix4x4 transformation;
+        transformation.translate(translation);
+        transformation.rotate(rotation);
+
+        // Render point cloud
+        glEnable(GL_PROGRAM_POINT_SIZE);
+        glPointSize(1.0f);
+
+        glBegin(GL_POINTS);
+        for (const auto& point : pointCloud) {
+            QColor rgbColor = rgbImage.pixelColor((point.x() + 1.0f) * 0.5f * rgbImage.width(),
+                                                  (point.y() + 1.0f) * 0.5f * rgbImage.height());
+
+            glColor3f(rgbColor.redF(), rgbColor.greenF(), rgbColor.blueF());
+
+            QVector4D transformedPoint = transformation * QVector4D(point, 1.0f);
+            glVertex3f(transformedPoint.x(), transformedPoint.y(), transformedPoint.z());
+        }
         glEnd();
+    }
 
-        glDisable(GL_TEXTURE_2D);
-        glEnable(GL_DEPTH_TEST);
+    void keyPressEvent(QKeyEvent* event) override {
+        const float translationStep = 0.1f;
+        const float rotationStep = 5.0f;
+
+        switch (event->key()) {
+        case Qt::Key_Left:
+            translation.setX(translation.x() - translationStep);
+            break;
+        case Qt::Key_Right:
+            translation.setX(translation.x() + translationStep);
+            break;
+        case Qt::Key_Up:
+            translation.setY(translation.y() - translationStep);
+            break;
+        case Qt::Key_Down:
+            translation.setY(translation.y() + translationStep);
+            break;
+        case Qt::Key_A:
+            rotation *= QQuaternion::fromEulerAngles(0.0f, -rotationStep, 0.0f);
+            break;
+        case Qt::Key_D:
+            rotation *= QQuaternion::fromEulerAngles(0.0f, rotationStep, 0.0f);
+            break;
+        case Qt::Key_W:
+            rotation *= QQuaternion::fromEulerAngles(-rotationStep, 0.0f, 0.0f);
+            break;
+        case Qt::Key_S:
+            rotation *= QQuaternion::fromEulerAngles(rotationStep, 0.0f, 0.0f);
+            break;
+        case Qt::Key_Q:
+            rotation *= QQuaternion::fromEulerAngles(0.0f, 0.0f, -rotationStep);
+            break;
+        case Qt::Key_E:
+            rotation *= QQuaternion::fromEulerAngles(0.0f, 0.0f, rotationStep);
+            break;
+        default:
+            QOpenGLWidget::keyPressEvent(event);
+            return;
+        }
+
+        update();
     }
 
 private:
-    GLuint textureId;
-    QImage image;
-    int widthW; // Width of the widget
-    int heightW; // Height of the widget
+    QVector3D translation;
+    QQuaternion rotation;
 };
 
-int main(int argc, char *argv[])
-{
-    QApplication a(argc, argv);
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
 
-    GLWidget w;
-    w.resize(1200, 900);
-    w.show();
+    PointCloudWidget widget;
+    widget.resize(640, 480);
+    widget.show();
 
-    return a.exec();
+    return app.exec();
 }
